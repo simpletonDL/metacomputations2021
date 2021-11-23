@@ -1,14 +1,15 @@
 #lang racket
 
 (require test-engine/racket-tests)
+(require "generated.rkt")
 
 ; Debug config
 (define PRINT_STATE 'PRINT_STATE)
 (define PRINT_INST 'PRINT_INST)
 (define PRINT_LBL 'PRINT_LBL)
 
-(define DEBUG (list ;PRINT_INST
-                    ;PRINT_LBL
+(define DEBUG (list PRINT_INST
+                    PRINT_LBL
                     ;PRINT_STATE
               ))
 
@@ -26,6 +27,9 @@
      (namespace-set-variable-value! 'modifyState modifyState #f ns)
      (namespace-set-variable-value! 'evalWithHashEnv evalWithHashEnv #f ns)
      (namespace-set-variable-value! 'reduceExprHash reduceExprHash #f ns)
+     (namespace-set-variable-value! 'makeHeader makeHeader #f ns)
+     (namespace-set-variable-value! 'getTrickLabels getTrickLabels #f ns)
+     (namespace-set-variable-value! 'makeSt makeSt #f ns)
      (eval code ns)
   )
 )
@@ -41,13 +45,16 @@
      (namespace-set-variable-value! 'empty? empty? #f ns)
      (namespace-set-variable-value! 'static? static? #f ns)
      (namespace-set-variable-value! 'printSt printSt #f ns)
+     (namespace-set-variable-value! 'makeHeader makeHeader #f ns) getTrickLabels
+     (namespace-set-variable-value! 'getTrickLabels getTrickLabels #f ns)
+     (namespace-set-variable-value! 'makeSt makeSt #f ns)
      (eval code ns)
   )
 )
 
 ; Reduction
 (define (reduceExpr expr vs)
-  (if (isStatic expr vs) (quote (evalWithEnv vs expr))
+  (if (isStatic expr vs) `(quote ,(evalWithEnv vs expr))
   (match expr
   [(cons f exprs)
      (cons f (map (lambda (e) (reduceExpr e vs)) exprs))
@@ -91,7 +98,7 @@
   )
 )
 
-; end
+; Static checker
 (define (static? expr division)
   (match expr
   [`',const #t]
@@ -115,6 +122,10 @@
   )
 )
 
+(define (makeHeader args staticVars)
+  (filter (lambda (arg) (not (member arg staticVars))) args)
+)
+
 (define (all lst)
   (or (empty? lst)  
       (and (car lst)
@@ -124,7 +135,24 @@
   (member mode DEBUG)
 )
 
-; State
+(define (concat xs)
+  (if (empty? xs) '() (append (car xs) (concat (cdr xs))))
+)
+
+(define (getDynamicLabelsOfInst inst div)
+   (match inst
+    [`(if ,exp ,tr ,fs) (if (static? exp div) '() (list tr fs))]
+    [else '()]
+   )
+)
+
+(define (getTrickLabels prog div)
+  (cons (caadr prog) (concat (concat
+      (map (lambda (bb) (map (lambda (inst) (getDynamicLabelsOfInst inst div)) (cdr bb))) (cdr prog))
+  )))
+)
+
+; State list
 (define (makeSt head values)
   (match head
     [`(read . ,vars) (zip vars values)]
@@ -140,6 +168,12 @@
     (println `(,(car mp) := ,(cdr mp)))
   )
 )
+
+; State hash
+(define (makeEmptyState) (make-immutable-hash))
+
+(define (modifyState st key value) (hash-set st key value))
+
 
 ; Interpreter
 
@@ -184,6 +218,79 @@
       )
     ]
   )
+)
+
+; FC division
+(define intFc_2_division
+  '(progFC head blocks bb insts inst)
+)
+
+; FC interpreter
+(define intFc_2
+  '((read progFC inp) ; progFC = s
+    (initFC
+      (head := (car progFC))  ; s
+      (st := (makeSt head inp))
+      (blocks := (cdr progFC)) ; s
+      (bb := (car blocks)) ; s
+      (goto make_bb)
+    )
+    (make_bb
+      (insts := (cdr bb)) ; s
+      (goto check_insts)
+    )
+    (check_insts
+      (if (empty? insts) error_expect_jump int_inst)
+    )
+    (int_inst
+      (inst := (car insts)) ; s
+      (insts := (cdr insts)) ; s
+      (goto check_if)
+    )
+    (check_if
+      (if (equal? (car inst) 'if) process_if check_assign)
+    )
+    (check_assign
+      (if (equal? (cadr inst) ':=) process_assign check_goto)
+    )
+    (check_goto
+      (if (equal? (car inst) 'goto) process_goto check_return)
+    )
+    (check_return
+      (if (equal? (car inst) 'return) process_return error_expect_jump)
+    )
+    (process_if
+      (if (evalWithEnv st (cadr inst)) process_if_true process_if_false)
+    )
+    (process_if_true
+      (bb := (assoc (caddr inst) blocks)) ;s
+      (goto make_bb)
+    )
+    (process_if_false
+      (bb := (assoc (cadddr inst) blocks)) ;s
+      (goto make_bb)
+    )
+    (process_assign ; x := 5
+      (st := (changeSt st (car inst) (evalWithEnv st (caddr inst))))
+      (goto check_insts)
+    )
+    (process_goto
+      (bb := (assoc (cadr inst) blocks)) ;s
+      (goto make_bb)
+    )
+    (process_return
+      (result := (evalWithEnv st (cadr inst)) ) ;d
+      (goto exit)
+    )
+    (error_expect_jump
+      (println "Expected goto/if in the end of bb")
+    )
+    (exit
+      (return result)
+    )
+    (debug
+      (return 0))
+   )
 )
 
 ; Turing machine interpreter
@@ -246,14 +353,16 @@
    )
 )
 
-(define ex
-  '((read x y)
-    (step1
-      (h := (+ x 2))
-      (y := (+ h y))
-      (return y))
-   )
-)
+(define compiled-tm-example
+  '((read Right)
+    (0 (Left := '())
+       (if (equal? '0 (car Right)) 2 1))
+    (1 (Left := (cons (car Right) Left))
+       (Right := (cdr Right))
+       (if (equal? '0 (car Right)) 2 1))
+    (2 (Right := (cons '1 (cdr Right)))
+       (return `(,Left unquote Right))))
+  )
 
 ; Renaming
 (define (renameInst inst labels)
@@ -294,17 +403,12 @@
 )
 
 (define (renameProg prog)
-  (let* ([newProgAndLabels (renameHelper prog '())]
+  (let* ([newProgAndLabels (renameHelper (cdr prog) '())]
          [newProg (car newProgAndLabels)]
          [labels (cdr newProgAndLabels)])
-     (map (lambda (bb) (cons (car bb) (renameInsts (cdr bb) labels))) newProg)
+     (cons (car prog) (map (lambda (bb) (cons (car bb) (renameInsts (cdr bb) labels))) newProg))
   )
 )
-
-; Mix
-; vs0:
-;     progSp <- intTM
-;     division <- ???
 
 (define mixDivision
   '(trickLabels
@@ -349,16 +453,20 @@
 (define mix_2
   '((read progSp_2 division_2 vs0_2) ; progSp_2 -> intTM, division_2 -> tmDivision
     (init_2
+       (trickLabels_2 := (getTrickLabels progSp_2 division_2))
+       (println trickLabels_2)
+       (residual_2 := (list (makeHeader (car progSp_2) division_2))) ; dynamic
        (progSp_2 := (cdr progSp_2)) ;s
-       (trickLabels_2 := '(initTM jumpTo_nextLbl loopCond)); (map car progSp_2)) ;s
+       ;(trickLabels_2 := '(initTM jumpTo_nextLbl loopCond)) ; (map car progSp_2)) ;s
+       ;(trickLabels_2 := '(init_2 exit_2 loop_2 assign_pp_static_2 nextLoopTrick_2 makeIfStaticTrue_2 makeIfStaticFalse_2) ); (map car progSp_2)) ;s
        (pp0_2 :=  (car (car progSp_2))) ;s
        (states_2 :=  (list (cons pp0_2 vs0_2))) ; dynamic
        (visited_2 := '()) ; dynamic
-       (residual_2 := '()) ; dynamic
        (goto loop_2))
     (checkLoop_2
        (if (null? states_2) exit_2 loop_2)) ;d
     (loop_2
+       (println (list 'visited_2 'length: (length visited_2)))
        (state_2 := (car states_2)) ; dynamic
        (states_2 := (cdr states_2)) ; dynamic
        (visited_2 := (cons state_2 visited_2)) ; dynamic
@@ -373,7 +481,7 @@
        (curTrickLabels_2 := trickLabels_2) ;s
        (goto checkLoopTrick_2))
     (checkLoopTrick_2
-       (if (empty? curTrickLabels_2) exit_2 loopTrick_2))
+       (if (empty? curTrickLabels_2) exit_2 loopTrick_2)) ;s
     (loopTrick_2
        (if (equal? pp_2 (car curTrickLabels_2)) assign_pp_static_2 nextLoopTrick_2)) ;d
     (nextLoopTrick_2
@@ -407,7 +515,7 @@
     (makeIf_2
        (if (static? (cadr cmd_2) division_2) makeIfStatic_2 makeIfDynamic_2)) ;s
     (makeIfStatic_2
-       (if (evalWithEnv vs_2 (cadr cmd_2)) makeIfStaticTrue_2 makeIfStaticFalse_2)) ;d
+       (if (evalWithHashEnv vs_2 (cadr cmd_2)) makeIfStaticTrue_2 makeIfStaticFalse_2)) ;d
     (makeIfStaticTrue_2
        (bb_2 := (cdr (assoc (caddr cmd_2) progSp_2))) ;s
        (goto check_bb_2))
@@ -419,18 +527,18 @@
        (false_state_2 := (cons (cadddr cmd_2) vs_2)) ;d
        (states_2 := (if (or (member true_state_2 visited_2) (member true_state_2 states_2)) states_2 (cons true_state_2 states_2))) ;d
        (states_2 := (if (or (member false_state_2 visited_2) (member false_state_2 states_2)) states_2 (cons false_state_2 states_2))) ;d
-       (reducedExprIf_2 := (reduceExpr (cadr cmd_2) vs_2)) ;d
+       (reducedExprIf_2 := (reduceExprHash (cadr cmd_2) vs_2)) ;d
        (code_2 := (append code_2 (list (list 'if reducedExprIf_2 true_state_2 false_state_2)) )) ;d
        (goto check_bb_2))
     ; Assignment processing
     (makeAssign_2
        (if (member (car cmd_2) division_2) makeAssignStatic_2 makeAssignDynamic_2)) ;s
     (makeAssignStatic_2
-       (valueAssignStatic_2 := (evalWithEnv vs_2 (caddr cmd_2))) ;d
-       (vs_2 := (changeSt vs_2 (car cmd_2) valueAssignStatic_2)) ;d
+       (valueAssignStatic_2 := (evalWithHashEnv vs_2 (caddr cmd_2))) ;d
+       (vs_2 := (modifyState vs_2 (car cmd_2) valueAssignStatic_2)) ;d ; (modifyState vs varAssign valueAssignStatic)
        (goto check_bb_2))
     (makeAssignDynamic_2
-       (reducedExprAss_2 := (reduceExpr (caddr cmd_2) vs_2)) ;d
+       (reducedExprAss_2 := (reduceExprHash (caddr cmd_2) vs_2)) ;d
        (cmdAssDynamic_2 := (list (car cmd_2) ':= reducedExprAss_2)) ;d
        (code_2 := (append code_2 (list cmdAssDynamic_2))) ;d
        (goto check_bb_2))
@@ -440,28 +548,46 @@
        (goto check_bb_2))
     ; Return processing
     (makeReturn_2
-       (redExpr_2 := (reduceExpr (cadr cmd_2) vs_2)) ;d
+       (redExpr_2 := (reduceExprHash (cadr cmd_2) vs_2)) ;d
        (code_2 := (append code_2 (list (list 'return redExpr_2)))) ;d
        (goto check_bb_2))
     (makeOther_2
-       (reduceOtherCmd_2 := (reduceExpr cmd_2 vs_2)) ;d
+       (reduceOtherCmd_2 := (reduceExprHash cmd_2 vs_2)) ;d
        (code_2 := (append code_2 (list reduceOtherCmd_2))) ;d
        (goto check_bb_2))
     (exit_2 (return residual_2))
    )
 )
 
+(define mixDivision_1
+  '(progSp
+    division
+    pp0
+    curTrickLabels_2
+    curLabel_2
+    pp_static_2
+    bb_2
+    cmd_2
+   
+    exprIf_2
+    true_pp_2
+    false_pp_2
+    
+    varAssign_2
+    expr_2
+    next_pp_2)
+)
 
 ; Basic mix
 (define mix
   '((read progSp division vs0)
     (init
+       (residual := (list (makeHeader (car progSp) division)))
        (progSp := (cdr progSp))
        (trickLabels := (map car progSp))
        (pp0 :=  (car (car progSp)))
        (states :=  `((,pp0 . ,vs0)))
        (visited := '())
-       (residual := '())
        (goto loop))
     (checkLoop
        (if (null? states) exit loop))
@@ -529,7 +655,6 @@
        (expr := (caddr cmd)) ;s
        (if (member varAssign division) makeAssignStatic makeAssignDynamic)) ;s
     (makeAssignStatic
-       ;(println `(staticAssign ,cmd))
        (valueAssignStatic := (evalWithHashEnv vs expr)) ;d
        (vs := (modifyState vs varAssign valueAssignStatic)) ;d
        (goto check_bb))
@@ -560,10 +685,12 @@
    )
 )
 
-(define (makeCmp)
-  (runMix mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 intTM) 'division_2 tmDivision))
-)
+;(define (makeCodeGen)
+;  (runMix mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 mix_2) 'division_2 mixDivision_2))
+;)
 
+
+; Запуск mix
 (define (runMix prog division vs)
   (renameProg (intFc mix `(,prog ,division ,vs)))
 )
@@ -572,313 +699,48 @@
   (renameProg (intFc mix_2 `(,prog ,division ,vs)))
 )
 
+; Компиляция программы машины тьюринга
 (define (compileTM prog)
   (runMix intTM tmDivision (modifyState (makeEmptyState) 'progTM prog))
 )
 
-
-
 (define (compileTM_2 prog)
-  (runMix_2 intTM tmDivision `((progTM . ,prog))))
+  (runMix_2 intTM tmDivision (modifyState (makeEmptyState) 'progTM prog))
+)
 
+; Создание компилятора машины тьюринга
+(define (makeTM_compiler)
+  (runMix mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 intTM) 'division_2 tmDivision))
+)
+
+(define (makeTM_compiler_2)
+  (runMix_2 mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 intTM) 'division_2 tmDivision))
+)
+
+; Создание компилятора FlowChart
+(define (makeFC_compiler)
+  (runMix mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 intFc_2) 'division_2 intFc_2_division))
+)
+
+; ...
 (define (runMixFindName vs0)
   (renameProg (intFc mix `(,find_name (valuelist (empty? valuelist)) ,vs0)))
 )
 
-; States
-(define (makeEmptyState) (make-immutable-hash))
-(define (modifyState st key value) (hash-set st key value))
-
-(define (run)
-  (renameProg (intFc compiler `( ((progTM . ,tm-example)) )
+; Компиляция программ через сгенеренный компилятор
+(define (compileTmGen prog)
+  (renameProg (intFc generatedTMCompiler (list (modifyState (makeEmptyState) 'progTM prog))
   ))
 )
 
-(define tm-example-compiled
- '((read Right)
-   (0 (Left := '()) (if (equal? 0 (car Right)) 2 1))
-   (1 (Left := (cons (car Right) Left)) (Right := (cdr Right)) (if (equal? 0 (car Right)) 2 1))
-   (2 (Right := (cons 1 (cdr Right))) (return `(,Left unquote Right))))
+(define (compileFcGen prog)
+  (renameProg (intFc generatedFCCompiler (list (modifyState (makeEmptyState) 'progFC prog))
+  ))
 )
 
-(define compiler
-'((read vs0_2)
-  (0
-   (states_2 := (list (cons 'initTM vs0_2)))
-   (visited_2 := '())
-   (residual_2 := '())
-   (state_2 := (car states_2))
-   (states_2 := (cdr states_2))
-   (visited_2 := (cons state_2 visited_2))
-   (vs_2 := (cdr state_2))
-   (code_2 := (list state_2))
-   (pp_2 := (car state_2))
-   (if (equal? pp_2 'initTM) 1 86))
-  (1
-   (reducedExprAss_2 := (reduceExpr ''() vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 'progTM))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (2 (redExpr_2 := (reduceExpr '`(,Left unquote Right) vs_2))
-     (code_2 := (append code_2 (list (list 'return redExpr_2))))
-     (residual_2 := (append residual_2 (list code_2)))
-     (if (null? states_2) 3 4))
-  (3 (return residual_2))
-  (4 (state_2 := (car states_2)) (states_2 := (cdr states_2)) (visited_2 := (cons state_2 visited_2)) (vs_2 := (cdr state_2)) (code_2 := (list state_2)) (pp_2 := (car state_2)) (if (equal? pp_2 'initTM) 5 6))
-  (5
-   (reducedExprAss_2 := (reduceExpr ''() vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 'progTM))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (6 (if (equal? pp_2 'jumpTo_nextLbl) 7 64))
-  (7 (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst)))))) (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2)) (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (8 (redExpr_2 := (reduceExpr '`(,Left unquote Right) vs_2)) (code_2 := (append code_2 (list (list 'return redExpr_2)))) (residual_2 := (append residual_2 (list code_2))) (if (null? states_2) 9 10))
-  (9 (return residual_2))
-  (10 (state_2 := (car states_2)) (states_2 := (cdr states_2)) (visited_2 := (cons state_2 visited_2)) (vs_2 := (cdr state_2)) (code_2 := (list state_2)) (pp_2 := (car state_2)) (if (equal? pp_2 'initTM) 11 12))
-  (11
-   (reducedExprAss_2 := (reduceExpr ''() vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 'progTM))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (12 (if (equal? pp_2 'jumpTo_nextLbl) 13 14))
-  (13 (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst)))))) (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2)) (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (14 (if (equal? pp_2 'loopCond) 15 44))
-  (15 (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (16 (redExpr_2 := (reduceExpr '`(,Left unquote Right) vs_2)) (code_2 := (append code_2 (list (list 'return redExpr_2)))) (residual_2 := (append residual_2 (list code_2))) (if (null? states_2) 17 18))
-  (17 (return residual_2))
-  (18 (state_2 := (car states_2)) (states_2 := (cdr states_2)) (visited_2 := (cons state_2 visited_2)) (vs_2 := (cdr state_2)) (code_2 := (list state_2)) (pp_2 := (car state_2)) (if (equal? pp_2 'initTM) 19 20))
-  (19
-   (reducedExprAss_2 := (reduceExpr ''() vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 'progTM))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (20 (if (equal? pp_2 'jumpTo_nextLbl) 21 22))
-  (21 (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst)))))) (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2)) (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (22 (if (equal? pp_2 'loopCond) 23 24))
-  (23 (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (24 (return residual_2))
-  (25
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(cdr (car progTail))))
-   (vs_2 := (changeSt vs_2 'inst valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car inst)))
-   (vs_2 := (changeSt vs_2 'instHead valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(cdr progTail)))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? instHead 'right)) 26 27))
-  (26
-   (reducedExprAss_2 := (reduceExpr '(cons (car Right) Left) vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (reducedExprAss_2 := (reduceExpr '(cdr Right) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (27 (if (evalWithEnv vs_2 '(equal? instHead 'left)) 28 29))
-  (28
-   (reducedExprAss_2 := (reduceExpr '(cons (car Left) Right) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (reducedExprAss_2 := (reduceExpr '(cdr Left) vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (29 (if (evalWithEnv vs_2 '(equal? instHead 'goto)) 30 31))
-  (30
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'nextLbl valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst))))))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (31 (if (evalWithEnv vs_2 '(equal? instHead 'write)) 32 33))
-  (32
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'value valueAssignStatic_2))
-   (reducedExprAss_2 := (reduceExpr '(cons value (cdr Right)) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (33 (if (evalWithEnv vs_2 '(equal? instHead 'if)) 34 43))
-  (34
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'condValue valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr (cdr (cdr inst))))))
-   (vs_2 := (changeSt vs_2 'nextLbl valueAssignStatic_2))
-   (true_state_2 := (cons 'jumpTo_nextLbl vs_2))
-   (false_state_2 := (cons 'loopCond vs_2))
-   (states_2 := (if (or (member true_state_2 visited_2) (member true_state_2 states_2)) states_2 (cons true_state_2 states_2)))
-   (states_2 := (if (or (member false_state_2 visited_2) (member false_state_2 states_2)) states_2 (cons false_state_2 states_2)))
-   (reducedExprIf_2 := (reduceExpr '(equal? condValue (car Right)) vs_2))
-   (code_2 := (append code_2 (list (list 'if reducedExprIf_2 true_state_2 false_state_2))))
-   (residual_2 := (append residual_2 (list code_2)))
-   (if (null? states_2) 35 36))
-  (35 (return residual_2))
-  (36 (state_2 := (car states_2)) (states_2 := (cdr states_2)) (visited_2 := (cons state_2 visited_2)) (vs_2 := (cdr state_2)) (code_2 := (list state_2)) (pp_2 := (car state_2)) (if (equal? pp_2 'initTM) 37 38))
-  (37
-   (reducedExprAss_2 := (reduceExpr ''() vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 'progTM))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (38 (if (equal? pp_2 'jumpTo_nextLbl) 39 40))
-  (39 (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst)))))) (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2)) (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (40 (if (equal? pp_2 'loopCond) 41 42))
-  (41 (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (42 (return residual_2))
-  (43 (redExpr_2 := (reduceExpr '`(,Left unquote Right) vs_2)) (code_2 := (append code_2 (list (list 'return redExpr_2)))) (residual_2 := (append residual_2 (list code_2))) (if (null? states_2) 17 18))
-  (44 (return residual_2))
-  (45
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(cdr (car progTail))))
-   (vs_2 := (changeSt vs_2 'inst valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car inst)))
-   (vs_2 := (changeSt vs_2 'instHead valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(cdr progTail)))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? instHead 'right)) 46 47))
-  (46
-   (reducedExprAss_2 := (reduceExpr '(cons (car Right) Left) vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (reducedExprAss_2 := (reduceExpr '(cdr Right) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (47 (if (evalWithEnv vs_2 '(equal? instHead 'left)) 48 49))
-  (48
-   (reducedExprAss_2 := (reduceExpr '(cons (car Left) Right) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (reducedExprAss_2 := (reduceExpr '(cdr Left) vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (49 (if (evalWithEnv vs_2 '(equal? instHead 'goto)) 50 51))
-  (50
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'nextLbl valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst))))))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (51 (if (evalWithEnv vs_2 '(equal? instHead 'write)) 52 53))
-  (52
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'value valueAssignStatic_2))
-   (reducedExprAss_2 := (reduceExpr '(cons value (cdr Right)) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (53 (if (evalWithEnv vs_2 '(equal? instHead 'if)) 54 63))
-  (54
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'condValue valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr (cdr (cdr inst))))))
-   (vs_2 := (changeSt vs_2 'nextLbl valueAssignStatic_2))
-   (true_state_2 := (cons 'jumpTo_nextLbl vs_2))
-   (false_state_2 := (cons 'loopCond vs_2))
-   (states_2 := (if (or (member true_state_2 visited_2) (member true_state_2 states_2)) states_2 (cons true_state_2 states_2)))
-   (states_2 := (if (or (member false_state_2 visited_2) (member false_state_2 states_2)) states_2 (cons false_state_2 states_2)))
-   (reducedExprIf_2 := (reduceExpr '(equal? condValue (car Right)) vs_2))
-   (code_2 := (append code_2 (list (list 'if reducedExprIf_2 true_state_2 false_state_2))))
-   (residual_2 := (append residual_2 (list code_2)))
-   (if (null? states_2) 55 56))
-  (55 (return residual_2))
-  (56 (state_2 := (car states_2)) (states_2 := (cdr states_2)) (visited_2 := (cons state_2 visited_2)) (vs_2 := (cdr state_2)) (code_2 := (list state_2)) (pp_2 := (car state_2)) (if (equal? pp_2 'initTM) 57 58))
-  (57
-   (reducedExprAss_2 := (reduceExpr ''() vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 'progTM))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (58 (if (equal? pp_2 'jumpTo_nextLbl) 59 60))
-  (59 (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst)))))) (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2)) (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (60 (if (equal? pp_2 'loopCond) 61 62))
-  (61 (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (62 (return residual_2))
-  (63 (redExpr_2 := (reduceExpr '`(,Left unquote Right) vs_2)) (code_2 := (append code_2 (list (list 'return redExpr_2)))) (residual_2 := (append residual_2 (list code_2))) (if (null? states_2) 9 10))
-  (64 (if (equal? pp_2 'loopCond) 65 66))
-  (65 (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (66 (return residual_2))
-  (67
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(cdr (car progTail))))
-   (vs_2 := (changeSt vs_2 'inst valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car inst)))
-   (vs_2 := (changeSt vs_2 'instHead valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(cdr progTail)))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? instHead 'right)) 68 69))
-  (68
-   (reducedExprAss_2 := (reduceExpr '(cons (car Right) Left) vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (reducedExprAss_2 := (reduceExpr '(cdr Right) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (69 (if (evalWithEnv vs_2 '(equal? instHead 'left)) 70 71))
-  (70
-   (reducedExprAss_2 := (reduceExpr '(cons (car Left) Right) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (reducedExprAss_2 := (reduceExpr '(cdr Left) vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (71 (if (evalWithEnv vs_2 '(equal? instHead 'goto)) 72 73))
-  (72
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'nextLbl valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst))))))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (73 (if (evalWithEnv vs_2 '(equal? instHead 'write)) 74 75))
-  (74
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'value valueAssignStatic_2))
-   (reducedExprAss_2 := (reduceExpr '(cons value (cdr Right)) vs_2))
-   (cmdAssDynamic_2 := (list 'Right ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (75 (if (evalWithEnv vs_2 '(equal? instHead 'if)) 76 85))
-  (76
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr inst))))
-   (vs_2 := (changeSt vs_2 'condValue valueAssignStatic_2))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 '(car (cdr (cdr (cdr inst))))))
-   (vs_2 := (changeSt vs_2 'nextLbl valueAssignStatic_2))
-   (true_state_2 := (cons 'jumpTo_nextLbl vs_2))
-   (false_state_2 := (cons 'loopCond vs_2))
-   (states_2 := (if (or (member true_state_2 visited_2) (member true_state_2 states_2)) states_2 (cons true_state_2 states_2)))
-   (states_2 := (if (or (member false_state_2 visited_2) (member false_state_2 states_2)) states_2 (cons false_state_2 states_2)))
-   (reducedExprIf_2 := (reduceExpr '(equal? condValue (car Right)) vs_2))
-   (code_2 := (append code_2 (list (list 'if reducedExprIf_2 true_state_2 false_state_2))))
-   (residual_2 := (append residual_2 (list code_2)))
-   (if (null? states_2) 77 78))
-  (77 (return residual_2))
-  (78 (state_2 := (car states_2)) (states_2 := (cdr states_2)) (visited_2 := (cons state_2 visited_2)) (vs_2 := (cdr state_2)) (code_2 := (list state_2)) (pp_2 := (car state_2)) (if (equal? pp_2 'initTM) 79 80))
-  (79
-   (reducedExprAss_2 := (reduceExpr ''() vs_2))
-   (cmdAssDynamic_2 := (list 'Left ':= reducedExprAss_2))
-   (code_2 := (append code_2 (list cmdAssDynamic_2)))
-   (valueAssignStatic_2 := (evalWithEnv vs_2 'progTM))
-   (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2))
-   (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 2 67))
-  (80 (if (equal? pp_2 'jumpTo_nextLbl) 81 82))
-  (81 (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst)))))) (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2)) (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (82 (if (equal? pp_2 'loopCond) 83 84))
-  (83 (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (84 (return residual_2))
-  (85 (redExpr_2 := (reduceExpr '`(,Left unquote Right) vs_2)) (code_2 := (append code_2 (list (list 'return redExpr_2)))) (residual_2 := (append residual_2 (list code_2))) (if (null? states_2) 3 4))
-  (86 (if (equal? pp_2 'jumpTo_nextLbl) 87 88))
-  (87 (valueAssignStatic_2 := (evalWithEnv vs_2 '(member nextLbl progTM (lambda (lbl inst) (equal? lbl (car inst)))))) (vs_2 := (changeSt vs_2 'progTail valueAssignStatic_2)) (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 8 45))
-  (88 (if (equal? pp_2 'loopCond) 89 90))
-  (89 (if (evalWithEnv vs_2 '(equal? (length progTail) 0)) 16 25))
-  (90 (return residual_2)))
+
+
+(define (run_2)
+  (renameProg (intFc genComp2 (list (modifyState (makeEmptyState) 'progTM tm-example))
+  ))
 )
