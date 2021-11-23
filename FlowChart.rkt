@@ -2,14 +2,16 @@
 
 (require test-engine/racket-tests)
 (require "generated.rkt")
+(require "generatedPrograms.rkt")
+(require "generatedCodeGen.rkt")
 
 ; Debug config
 (define PRINT_STATE 'PRINT_STATE)
 (define PRINT_INST 'PRINT_INST)
 (define PRINT_LBL 'PRINT_LBL)
 
-(define DEBUG (list PRINT_INST
-                    PRINT_LBL
+(define DEBUG (list ;PRINT_INST
+                    ;PRINT_LBL
                     ;PRINT_STATE
               ))
 
@@ -270,7 +272,7 @@
       (bb := (assoc (cadddr inst) blocks)) ;s
       (goto make_bb)
     )
-    (process_assign ; x := 5
+    (process_assign
       (st := (changeSt st (car inst) (evalWithEnv st (caddr inst))))
       (goto check_insts)
     )
@@ -330,17 +332,13 @@
 )
 
 (define tmDivision
-  '(; Vars
+  '(
       progTM progTail inst instHead nextLbl value condValue
    )
 )
 
 ; Turing machine example program
 (define tm-example '((0 if 0 goto 3) (1 right) (2 goto 0) (3 write 1)))
-
-; Testing
-(check-expect (intFc find_name '(z (x y z) (1 2 3))) 3)
-(check-expect (intFc intTM `(,tm-example (1 1 1 0 1 0))) '((1 1 1) 1 1 0))
 
 ; FlowChart example programs
 (define find_name
@@ -352,17 +350,6 @@
     (found (return (car valuelist)))
    )
 )
-
-(define compiled-tm-example
-  '((read Right)
-    (0 (Left := '())
-       (if (equal? '0 (car Right)) 2 1))
-    (1 (Left := (cons (car Right) Left))
-       (Right := (cdr Right))
-       (if (equal? '0 (car Right)) 2 1))
-    (2 (Right := (cons '1 (cdr Right)))
-       (return `(,Left unquote Right))))
-  )
 
 ; Renaming
 (define (renameInst inst labels)
@@ -456,9 +443,7 @@
        (trickLabels_2 := (getTrickLabels progSp_2 division_2))
        (println trickLabels_2)
        (residual_2 := (list (makeHeader (car progSp_2) division_2))) ; dynamic
-       (progSp_2 := (cdr progSp_2)) ;s
-       ;(trickLabels_2 := '(initTM jumpTo_nextLbl loopCond)) ; (map car progSp_2)) ;s
-       ;(trickLabels_2 := '(init_2 exit_2 loop_2 assign_pp_static_2 nextLoopTrick_2 makeIfStaticTrue_2 makeIfStaticFalse_2) ); (map car progSp_2)) ;s
+       (progSp_2 := (cdr progSp_2))
        (pp0_2 :=  (car (car progSp_2))) ;s
        (states_2 :=  (list (cons pp0_2 vs0_2))) ; dynamic
        (visited_2 := '()) ; dynamic
@@ -535,7 +520,7 @@
        (if (member (car cmd_2) division_2) makeAssignStatic_2 makeAssignDynamic_2)) ;s
     (makeAssignStatic_2
        (valueAssignStatic_2 := (evalWithHashEnv vs_2 (caddr cmd_2))) ;d
-       (vs_2 := (modifyState vs_2 (car cmd_2) valueAssignStatic_2)) ;d ; (modifyState vs varAssign valueAssignStatic)
+       (vs_2 := (modifyState vs_2 (car cmd_2) valueAssignStatic_2)) ;d 
        (goto check_bb_2))
     (makeAssignDynamic_2
        (reducedExprAss_2 := (reduceExprHash (caddr cmd_2) vs_2)) ;d
@@ -646,7 +631,7 @@
        (false_state := `(,false_pp . ,vs))
        (states := (if (or (member false_state visited) (member false_state states)) states (cons false_state states))) ;d
        (states := (if (or (member true_state visited) (member true_state states)) states (cons true_state states))) ;d
-       (reducedExprIf := (reduceExprHash exprIf vs)) ; TODO reduce with hash env
+       (reducedExprIf := (reduceExprHash exprIf vs)) ;
        (code := (append code `((if ,reducedExprIf ,true_state ,false_state)))) ;d
        (goto check_bb))
     ; Assignment processing
@@ -659,10 +644,7 @@
        (vs := (modifyState vs varAssign valueAssignStatic)) ;d
        (goto check_bb))
     (makeAssignDynamic
-       ;(println `(dynamicAssign ,cmd))
-       ;(println expr)
-
-       (reducedExprAss := (reduceExprHash expr vs)) ;d TODO reduce with hash env
+       (reducedExprAss := (reduceExprHash expr vs)) ;d
        (cmdAssDynamic := `(,varAssign := ,reducedExprAss)) ;d
        (code := (append code `(,cmdAssDynamic))) ;d
        (goto check_bb))
@@ -674,21 +656,16 @@
     ; Return processing
     (makeReturn
        ; TODO: reduce expr
-       (redExpr := (reduceExprHash (cadr cmd) vs)) ;d TODO reduce with hash env
+       (redExpr := (reduceExprHash (cadr cmd) vs)) ;d
        (code := (append code `((return ,redExpr)))) ;d
        (goto check_bb))
     (makeOther
-       (reduceOtherCmd := (reduceExprHash cmd vs))  ; TODO reduce with hash env
+       (reduceOtherCmd := (reduceExprHash cmd vs))  ;
        (code := (append code `(,reduceOtherCmd)))
        (goto check_bb))
     (exit (return residual))
    )
 )
-
-;(define (makeCodeGen)
-;  (runMix mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 mix_2) 'division_2 mixDivision_2))
-;)
-
 
 ; Запуск mix
 (define (runMix prog division vs)
@@ -709,10 +686,6 @@
 )
 
 ; Создание компилятора машины тьюринга
-(define (makeTM_compiler)
-  (runMix mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 intTM) 'division_2 tmDivision))
-)
-
 (define (makeTM_compiler_2)
   (runMix_2 mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 intTM) 'division_2 tmDivision))
 )
@@ -722,12 +695,12 @@
   (runMix mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 intFc_2) 'division_2 intFc_2_division))
 )
 
-; ...
-(define (runMixFindName vs0)
-  (renameProg (intFc mix `(,find_name (valuelist (empty? valuelist)) ,vs0)))
+; Создание кодгена
+(define (makeCodeGen!)
+  (runMix_2 mix_2 mixDivision_2 (modifyState (modifyState (makeEmptyState) 'progSp_2 mix_2) 'division_2 mixDivision_2))
 )
 
-; Компиляция программ через сгенеренный компилятор
+; Компиляция программ через сгенеренные миксом компиляторы
 (define (compileTmGen prog)
   (renameProg (intFc generatedTMCompiler (list (modifyState (makeEmptyState) 'progTM prog))
   ))
@@ -738,9 +711,22 @@
   ))
 )
 
+; Генерация компилятора через codeGen
+(define (makeCompiler interpreter division)
+  (renameProg (intFc codeGen (list (modifyState (modifyState (makeEmptyState) 'progSp_2 interpreter) 'division_2 division))))
+)
 
-
-(define (run_2)
-  (renameProg (intFc genComp2 (list (modifyState (makeEmptyState) 'progTM tm-example))
+; Компиляция программ через сгенерированные кодгеном компиляторы
+(define (compileTmGenByCodeGen prog)
+  (renameProg (intFc codeGenTmCompiler (list (modifyState (makeEmptyState) 'progTM prog))
   ))
 )
+
+; Тесты
+(check-expect (intFc find_name '(z (x y z) (1 2 3))) 3)
+(check-expect (intFc intTM `(,tm-example (1 1 1 0 1 0))) '((1 1 1) 1 1 0))
+
+(check-expect (intFc findNameFcCompiled '((z (x y z) (1 2 3)))) 3)
+(check-expect (intFc tmExampleCompiled '((1 1 1 0 1 0 1))) '((1 1 1) 1 1 0 1))
+
+(check-expect (equal? (compileTmGenByCodeGen tm-example) (compileTmGen tm-example)) #t)
